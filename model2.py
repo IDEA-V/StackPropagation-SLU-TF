@@ -41,9 +41,7 @@ def init_args():
 def loop_fn_build(inputs, init_tensor, embedding_matrix, cell, batch_size, embedding_size, sequence_length, dense,
                   sentence_size):
 
-    sizess = tf.constant(1)
-
-    inputs_ta = tf.TensorArray(dtype=tf.float32, size=sizess)
+    inputs_ta = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
     # [B,T,S]-->[T,B,S]
     inputs_trans = tf.transpose(inputs, perm=[1, 0, 2])
     inputs_ta = inputs_ta.unstack(inputs_trans)
@@ -80,8 +78,7 @@ def build_decoder(input_tensor, force_tensor, cond_tensor, embedding_tensor, ini
             [input_tensor, tf.concat([tf.tile(init_tensor, [batch_size, 1, 1]), force_embed], 1)], 2)
         decoder_input = tf.nn.dropout(decoder_input, rate=1-keep_prob)
         
-        force_decoder = RNN(decoder_cell, return_sequences=True )
-        force_decoder = force_decoder(decoder_input)
+        force_decoder = decoder_cell(decoder_input)
         force_decoder = tf.nn.dropout(force_decoder, rate=1-keep_prob)
 
         return force_decoder
@@ -102,6 +99,12 @@ def build_decoder(input_tensor, force_tensor, cond_tensor, embedding_tensor, ini
         )
         non_force_decoder = tf.transpose(outputs.stack(), [1, 0, 2])
         return non_force_decoder
+
+    a = force()
+    inputs_ta = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
+    # [B,T,S]-->[T,B,S]
+    inputs_trans = tf.transpose(input_tensor, perm=[1, 0, 2])
+    inputs_ta = inputs_ta.unstack(inputs_trans)
 
     if force_tensor is not None:
         # decoder = force()
@@ -128,7 +131,7 @@ slot_feeding = random() > args.slot_forcing_rate
 batch_size, sentence_size = tf.shape(text)[0], tf.shape(text)[1]
 
 print("=============================")
-print(text.shape.num_elements())
+print(batch_size)
 print(sentence_size)
 
 slots_shape = tf.shape(slots)
