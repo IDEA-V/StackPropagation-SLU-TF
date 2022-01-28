@@ -1,11 +1,12 @@
 import argparse
+from io import BufferedWriter
 import numpy as np
 import math
 from random import random
 
 import tensorflow as tf
 from tensorflow.keras import Input, Model
-from tensorflow.keras.layers import LSTMCell, Bidirectional, RNN
+from tensorflow.keras.layers import LSTM, Bidirectional, RNN
 
 from dataset import DataProcessor
 
@@ -39,7 +40,10 @@ def init_args():
 
 def loop_fn_build(inputs, init_tensor, embedding_matrix, cell, batch_size, embedding_size, sequence_length, dense,
                   sentence_size):
-    inputs_ta = tf.TensorArray(dtype=tf.float32, size=sentence_size)
+
+    sizess = tf.constant(1)
+
+    inputs_ta = tf.TensorArray(dtype=tf.float32, size=sizess)
     # [B,T,S]-->[T,B,S]
     inputs_trans = tf.transpose(inputs, perm=[1, 0, 2])
     inputs_ta = inputs_ta.unstack(inputs_trans)
@@ -74,10 +78,12 @@ def build_decoder(input_tensor, force_tensor, cond_tensor, embedding_tensor, ini
         force_embed = tf.nn.embedding_lookup(embedding_tensor, force_tensor[:, :-1])
         decoder_input = tf.concat(
             [input_tensor, tf.concat([tf.tile(init_tensor, [batch_size, 1, 1]), force_embed], 1)], 2)
-        decoder_input = tf.nn.dropout(decoder_input, keep_prob=keep_prob)
+        decoder_input = tf.nn.dropout(decoder_input, rate=1-keep_prob)
         
         force_decoder = RNN(decoder_cell, return_sequences=True )
         force_decoder = force_decoder(decoder_input)
+        force_decoder = tf.nn.dropout(force_decoder, rate=1-keep_prob)
+
         return force_decoder
 
     def non_force():
@@ -111,66 +117,71 @@ data_processor = DataProcessor()
 slots_loss, intents_loss = 0, 0
 train_data = data_processor.get_data("train", batch_size=args.batch_size)
 
-text = Input(shape=[args.batch_size, None])
-slots = Input(shape=[args.batch_size, None])
-word_weights = Input(shape=[args.batch_size, None])
-sequence_length = Input(shape=[args.batch_size, None])
-intent = Input(shape=[args.batch_size, None])
+text = Input(shape=(None,), dtype=tf.int32)
+slots = Input(shape=(None,), dtype=tf.int32)
+word_weights = Input(shape=(None,), dtype=tf.float32)
+sequence_length = Input(shape=(None,), dtype=tf.int32)
+intent = Input(shape=(None,), dtype=tf.int32)
 intent_feeding = random() > args.intent_forcing_rate
 slot_feeding = random() > args.slot_forcing_rate
 
 batch_size, sentence_size = tf.shape(text)[0], tf.shape(text)[1]
-slots_shape = tf.shape(slots)
 
-embedding_encoder = tf.Variable(name="embedding", shape=[args.num_words, args.word_embedding_dim])
+print("=============================")
+print(text.shape.num_elements())
+print(sentence_size)
+
+slots_shape = tf.shape(slots)
+var_initializer = tf.initializers.GlorotUniform()
+
+embedding_encoder = tf.Variable(var_initializer([args.num_words, args.word_embedding_dim]), name="embedding")
+
 word_tensor = tf.nn.embedding_lookup(embedding_encoder, text)
-word_tensor = tf.nn.dropout(word_tensor, keep_prob=args.dropout_rate)
+word_tensor = tf.nn.dropout(word_tensor, rate=args.dropout_rate)
+
 
 # lstm encoder
-cell_fw = LSTMCell(args.encoder_hidden_dim // 2)
-cell_fw = tf.nn.RNNCellDropoutWrapper(cell_fw, input_keep_prob=args.dropout_rate,
-                                 output_keep_prob=args.dropout_rate)
-cell_bw = LSTMCell(args.encoder_hidden_dim // 2)
-cell_bw = tf.nn.RNNCellDropoutWrapper(cell_bw, input_keep_prob=args.dropout_rate,
-                                 output_keep_prob=args.dropout_rate)
+lstm_fw = LSTM(args.encoder_hidden_dim // 2, return_sequences=True, dropout = args.dropout_rate)
+lstm_bw = LSTM(args.encoder_hidden_dim // 2, return_sequences=True, dropout = args.dropout_rate, go_backwards = True)
 
-lstm_fw = RNN(cell_fw, return_sequences=True)
-lstm_bw = RNN(cell_bw, return_sequences=True, go_backwards = True)
-
-lstm_encoder = Bidirectional(lstm_fw, backward_layer= lstm_bw)
+lstm_encoder = Bidirectional(lstm_fw, backward_layer = lstm_bw, merge_mode=None)
 lstm_encoder = lstm_encoder(word_tensor)
-lstm_encoder = tf.concat([lstm_encoder[0], lstm_encoder[1]], 2)
+
+fw = tf.nn.dropout(lstm_encoder[0], rate=args.dropout_rate)
+bw = tf.nn.dropout(lstm_encoder[1], rate=args.dropout_rate)
+
+lstm_encoder = tf.concat([fw, bw], 2)
 
 #self attention
-q_m = tf.Variable(name="query_dense", shape=[args.word_embedding_dim, args.attention_hidden_dim])
-k_m = tf.Variable(name="key_dense", shape=[args.word_embedding_dim, args.attention_hidden_dim])
-v_m = tf.Variable(name="value_dense", shape=[args.word_embedding_dim, args.attention_output_dim])
+q_m = tf.Variable(var_initializer([args.word_embedding_dim, args.attention_hidden_dim]), name="query_dense")
+k_m = tf.Variable(var_initializer([args.word_embedding_dim, args.attention_hidden_dim]), name="key_dense")
+v_m = tf.Variable(var_initializer([args.word_embedding_dim, args.attention_output_dim]), name="value_dense")
 q = tf.einsum('ijk,kl->ijl', word_tensor, q_m)
 k = tf.einsum('ijk,kl->ijl', word_tensor, k_m)
 v = tf.einsum('ijk,kl->ijl', word_tensor, v_m)
 score = tf.nn.softmax(tf.matmul(q, k, transpose_b=True)) / math.sqrt(args.attention_hidden_dim)
 attention_tensor = tf.matmul(score, v)
-attention_tensor = tf.nn.dropout(attention_tensor, keep_prob=args.dropout_rate)
+attention_tensor = tf.nn.dropout(attention_tensor, rate=args.dropout_rate)
 
 encoder = tf.concat([lstm_encoder, attention_tensor], 2)
 
 initializer=tf.random_normal_initializer()
 #intent decoder
-embedding_intent_decoder = tf.Variable(name="intent_embedding", shape=[args.num_intents, args.intent_embedding_dim])
-intent_init_tensor = tf.Variable(initializer([1, 1, args.intent_embedding_dim]), name="intent_init", shape=[1, 1, args.intent_embedding_dim])
-intent_decoder_cell = LSTMCell(args.slot_decoder_hidden_dim)
-intent_decoder_cell = tf.nn.RNNCellDropoutWrapper(intent_decoder_cell, input_keep_prob=args.dropout_rate,
-                                 output_keep_prob=args.dropout_rate)
-intent_dense = tf.Variable("intent_dense", shape=[args.intent_decoder_hidden_dim, args.num_intents])
+embedding_intent_decoder = tf.Variable(var_initializer([args.num_intents, args.intent_embedding_dim]), name="intent_embedding")
+intent_init_tensor = tf.Variable(initializer([1, 1, args.intent_embedding_dim]), name="intent_init")
+
+intent_decoder_cell = LSTM(args.slot_decoder_hidden_dim, return_sequences=True, dropout = args.dropout_rate)
+
+intent_dense = tf.Variable(var_initializer([args.intent_decoder_hidden_dim, args.num_intents]), name="intent_dense")
 intent_decoder = build_decoder(encoder, intent, intent_feeding, embedding_intent_decoder,
-                                           intent_init_tensor, batch_size, args.dropout_rate, intent_decoder_cell,
+                                           intent_init_tensor, batch_size, 1-args.dropout_rate, intent_decoder_cell,
                                            args, intent_dense, sentence_size, sequence_length,
                                            args.intent_embedding_dim)
 intent_pred = tf.einsum('ijk,kl->ijl', intent_decoder, intent_dense)
 slot_combine = tf.concat([encoder, intent_pred], 2, name='slotInput')
 
 #slot decoder
-embedding_slot_decoder = tf.Variable(name="slot_embedding", shape=[args.num_slots, args.slot_embedding_dim])
+embedding_slot_decoder = tf.Variable(var_initializer([args.num_slots, args.slot_embedding_dim]), name="slot_embedding")
 slot_init_tensor = tf.Variable(initializer([1, 1, args.slot_embedding_dim]), name ="slot_init", shape=[1, 1, args.slot_embedding_dim])
 
 slot_decoder_cell = LSTMCell(args.slot_decoder_hidden_dim)
