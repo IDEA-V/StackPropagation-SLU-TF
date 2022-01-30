@@ -1,5 +1,7 @@
 import random
-
+import math
+import numpy as np
+from tensorflow.keras.utils import Sequence
 
 def create_vocab(name):
     path = "./alphabet/" + name
@@ -39,12 +41,12 @@ def get_items(path, word_dict, intent_dict, slot_dict):
     return item
 
 
-class DataProcessor:
-    def __init__(self):
+class DataProcessor(Sequence):
+    def __init__(self, batch_size):
         self.intent_list, self.intent_dict = create_vocab("intent")
         self.word_list, self.word_dict = create_vocab("word")
         self.slot_list, self.slot_dict = create_vocab("slot")
-        self.batch_size = 1
+        self.batch_size = batch_size
         self.data = {'train': get_items(
             "./data/snips/train.txt",
             self.word_dict,
@@ -61,24 +63,36 @@ class DataProcessor:
             self.intent_dict,
             self.slot_dict,
         )}
+        self.choose_data("train")
 
-    def get_data(self, name="train", batch_size=32):
-        data = self.data[name]
+    def choose_data(self, name):
+        self.name = name
+        data = self.data[self.name]
         random.shuffle(data)
-        word, seq, slot, intent = ([data[i][j] for i in range(len(data))]for j in range(4))
-        batches = [(word[i:i + batch_size], seq[i:i + batch_size], slot[i:i + batch_size], intent[i:i + batch_size]) for i in
-                   range(0, len(word), batch_size)]
-        all_batch = []
-        for batch in batches:
-            max_len = max([len(item) for item in batch[0]])
-            length = [len(item) for item in batch[0]]
-            all_batch.append(
-                ([[item + [0 for i in range(max_len - len(item))] for item in batch[j]] for j in range(len(batch))]+[length])
-            )
-        return all_batch
+        self.word, self.seq, self.slot, self.intent = ([data[i][j] for i in range(len(data))] for j in range(4))
+
+    def __len__(self):
+        return math.ceil(len(self.data[self.name]) / self.batch_size)
+
+    def __getitem__(self, i):
+        batch = (self.word[i:i + self.batch_size], self.seq[i:i + self.batch_size], self.slot[i:i + self.batch_size], self.intent[i:i + self.batch_size])
+        max_len = max([len(item) for item in batch[0]])
+        length = [[len(item)]*max_len for item in batch[0]]
+
+        x = [[item + [0 for i in range(max_len - len(item))] for item in batch[j]] for j in range(len(batch))]+[length]
+
+        for i in range(len(x)):
+            x[i] = np.asarray(x[i]).astype(np.int32)
+
+        y = x[2:4]
+        z = x[1]
+        x = [x[0]] + x[2:]
+        return x, y, z
+
 
 
 if __name__ == "__main__":
     # datasets = get_dataset(8, 73, 16, 10)
-    data_processor = DataProcessor()
-    data_processor.get_data('train')
+    data_processor = DataProcessor(16)
+    a = data_processor[0]
+    b = 1
